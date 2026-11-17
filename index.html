@@ -32,12 +32,12 @@
   }
   .overlay {
     position: absolute; inset: 0; border-radius: 10px;
-    background: rgba(15, 30, 16, 0.82); display: flex; flex-direction: column;
+    background: rgba(15, 30, 16, 0.85); display: flex; flex-direction: column;
     align-items: center; justify-content: center; text-align: center;
     padding: 24px; gap: 10px;
   }
   .overlay h2 { margin: 0; font-size: 28px; }
-  .overlay ul { text-align: left; max-width: 460px; line-height: 1.5; font-size: 15px; }
+  .overlay ul { text-align: left; max-width: 480px; line-height: 1.5; font-size: 15px; }
   .overlay .big { font-size: 17px; margin: 4px 0; }
   .hidden { display: none; }
   #banner {
@@ -53,7 +53,7 @@
 <div id="hud">
   <span class="chip" id="waveChip">Welle 1</span>
   <span class="chip" id="flowerChip">🌼 8</span>
-  <span class="chip" id="stoneChip">🪨 8</span>
+  <span class="chip" id="stoneChip">🪨 6</span>
   <span class="chip" id="saveChip">💚 0</span>
   <button id="restartBtn">Neustart</button>
   <button id="muteBtn">🔊</button>
@@ -62,14 +62,15 @@
   <canvas id="game" width="880" height="616"></canvas>
   <div id="banner"></div>
   <div class="overlay" id="startOverlay">
-    <h2>🐢 Jeannies Schildkröten</h2>
-    <div class="big">Die bösen Schildkröten wollen Jeannies Blumen fressen!</div>
+    <h2>🐢 Jeannies Schildkröten 🎱</h2>
+    <div class="big">Schildkröten-Billard: Lenke sie ab, töte sie nie!</div>
     <ul>
-      <li>🪨 <b>Klicke auf eine Wiese</b>, um einen Stein zu bauen. Klicke einen Stein wieder an, um ihn zurückzubauen.</li>
-      <li>🧱 Blockiere die Wege zu den Blumen, damit die Schildkröten umgeleitet werden.</li>
-      <li>🍀 Leite sie zur <b>Kleeblattwiese am rechten Rand</b> – dort werden sie satt und gehen glücklich fort.</li>
-      <li>❌ <b>Töten verboten!</b> Die Schildkröten werden nur kurz krummelig, wenn man ihnen den Weg versperrt.</li>
-      <li>🌼 Frisst eine Schildkröte alle Blumen auf, ist das Spiel vorbei.</li>
+      <li>🐢 Schildkröten kriechen <b>geradlinig</b> auf die nächste Blume zu. Die gestrichelte Linie zeigt ihr Ziel.</li>
+      <li>🪨 <b>Klicke auf eine Wiese</b>, um einen Stein in ihren Weg zu setzen. Klick auf einen Stein hebt ihn wieder auf.</li>
+      <li>😤 Prallt eine Schildkröte an einem Stein ab, wird sie kurz <b>krummelig</b> und dann <b>benommen</b>: Sie kriechet geradeaus weiter, genau wie ein Billardball.</li>
+      <li>🍀 Nur im benommenen Zustand erreichen sie die <b>Kleeblattwiese am rechten Rand</b>. Dort fressen sie sich satt und gehen glücklich fort. Kettenstöße über mehrere Steine bringen Ruhm!</li>
+      <li>🪃 Am Zaun drehen benommene Schildkröten um und nehmen wieder Kurs auf die Blumen. Bleib wachsam!</li>
+      <li>🥀 Fressen sie alle Blumen auf, ist das Spiel vorbei. Töten ist natürlich verboten.</li>
     </ul>
     <button id="startBtn">Spiel starten</button>
   </div>
@@ -84,18 +85,18 @@
 (() => {
   const COLS = 20, ROWS = 14, CELL = 44;
   const W = COLS * CELL, H = ROWS * CELL;
+  const TR = 14;              // Schildkröten-Radius
+  const MARGIN = TR + 2;      // Zaun-Abstand
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
 
   // ---------- state ----------
   let state = 'start'; // start | playing | intermission | gameover
   let wave, stones, saved, savesSinceStone, flowers, turtles, particles;
-  let stoneSet;                 // Set of "c,r"
-  let flowerField, cloverField; // Int16Array distance fields
-  let spawnQueue, spawnT, interT, overT;
+  let stoneSet;                  // Set of "c,r"
+  let spawnQueue, spawnT, interT, placeCd;
   let hoverCell = null;
   let muted = false;
-  let idCounter = 0;
 
   const CLOVER_C0 = 18, CLOVER_C1 = 19, CLOVER_R0 = 4, CLOVER_R1 = 9;
   const FLOWER_COLORS = ['#f06292','#ba68c8','#ffb74d','#4fc3f7','#fff176','#f8bbd0','#ff8a65','#aed581'];
@@ -129,67 +130,23 @@
     } catch (e) {}
   }
 
-  // ---------- distance fields (multi-source BFS) ----------
-  function bfs(targets) {
-    const dist = new Int16Array(COLS * ROWS).fill(-1);
-    const q = [];
-    for (const [c, r] of targets) {
-      if (walkable(c, r) && dist[idx(c, r)] === -1) {
-        dist[idx(c, r)] = 0; q.push([c, r]);
-      }
-    }
-    let head = 0;
-    while (head < q.length) {
-      const [c, r] = q[head++];
-      const d = dist[idx(c, r)];
-      for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nc = c + dc, nr = r + dr;
-        if (walkable(nc, nr) && dist[idx(nc, nr)] === -1) {
-          dist[idx(nc, nr)] = d + 1; q.push([nc, nr]);
-        }
-      }
-    }
-    return dist;
-  }
-
-  function recalcFields() {
-    const ft = [];
-    for (const f of flowers) {
-      if (!f.alive) continue;
-      for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nc = f.c + dc, nr = f.r + dr;
-        if (walkable(nc, nr)) ft.push([nc, nr]);
-      }
-    }
-    flowerField = bfs(ft);
-    const ct = [];
-    for (let c = CLOVER_C0; c <= CLOVER_C1; c++)
-      for (let r = CLOVER_R0; r <= CLOVER_R1; r++) ct.push([c, r]);
-    cloverField = bfs(ct);
-  }
-
   // ---------- game setup ----------
   function resetGame() {
-    wave = 1; stones = 8; saved = 0; savesSinceStone = 0;
+    wave = 1; stones = 6; saved = 0; savesSinceStone = 0;
     stoneSet = new Set();
     flowers = START_FLOWERS.map(([c, r], i) => ({
       c, r, hp: 3, alive: true, color: FLOWER_COLORS[i % FLOWER_COLORS.length], hurtT: 0
     }));
     turtles = []; particles = [];
-    spawnQueue = 0; spawnT = 0; interT = 0; overT = 0;
-    recalcFields();
-    startWave();
-  }
-
-  function startWave() {
-    spawnQueue = 2 + wave;
-    spawnT = 0.5;
+    spawnQueue = 0; spawnT = 0.5; interT = 0; placeCd = 0;
     state = 'playing';
     updateHud();
   }
 
+  function baseSpeed() { return Math.min(90, 42 + wave * 4); }
+
   function spawnTurtle() {
-    // random edge cell, not clover, walkable
+    // random edge cell, not clover
     let cell = null;
     for (let i = 0; i < 80; i++) {
       const side = Math.floor(Math.random() * 4);
@@ -198,22 +155,48 @@
       else if (side === 1) { c = COLS - 1; r = Math.floor(Math.random() * ROWS); }
       else if (side === 2) { c = Math.floor(Math.random() * COLS); r = 0; }
       else { c = Math.floor(Math.random() * COLS); r = ROWS - 1; }
-      if (!isClover(c, r) && walkable(c, r)) { cell = { c, r }; break; }
+      if (!isClover(c, r)) { cell = { c, r }; break; }
     }
     if (!cell) return;
     const p = cellCenter(cell.c, cell.r);
-    turtles.push({
-      id: idCounter++, x: p.x, y: p.y, dir: 0,
-      speed: Math.min(92, 52 + wave * 4),
-      mode: 'flower', state: 'walk', grumpyT: 0, biteT: 0, munchT: 0,
-      target: null, lastNext: null, wanderT: 0, prevCellKey: ''
-    });
+    const t = {
+      x: p.x, y: p.y, dir: 0,
+      baseSpeed: baseSpeed(), speed: baseSpeed(),
+      state: 'crawl', locked: true, target: null,
+      grumpyT: 0, biteT: 0, munchT: 0, bounces: 0
+    };
+    relock(t);
+    turtles.push(t);
+  }
+
+  // ---------- targeting ----------
+  function nearestFlower(t) {
+    let best = null, bd = Infinity;
+    for (const f of flowers) {
+      if (!f.alive) continue;
+      const p = cellCenter(f.c, f.r);
+      const d = Math.hypot(p.x - t.x, p.y - t.y);
+      if (d < bd) { bd = d; best = f; }
+    }
+    return best;
+  }
+  function relock(t) {
+    const f = nearestFlower(t);
+    if (f) {
+      const p = cellCenter(f.c, f.r);
+      t.target = f;
+      t.dir = Math.atan2(p.y - t.y, p.x - t.x);
+      t.locked = true;
+    } else {
+      t.target = null;
+      t.locked = false;
+    }
   }
 
   // ---------- stones ----------
   function turtleOnCell(c, r) {
     const p = cellCenter(c, r);
-    return turtles.some(t => Math.hypot(t.x - p.x, t.y - p.y) < CELL * 0.75);
+    return turtles.some(t => Math.hypot(t.x - p.x, t.y - p.y) < CELL * 0.7);
   }
   function canPlace(c, r) {
     return inGrid(c, r) && !isClover(c, r) && !isStone(c, r) &&
@@ -224,48 +207,72 @@
     if (isStone(c, r)) {
       stoneSet.delete(key); stones++;
       beep(300, 0.06, 'triangle');
-      onStonesChanged(c, r, false);
     } else if (canPlace(c, r)) {
       stoneSet.add(key); stones--;
       beep(180, 0.07, 'square');
-      onStonesChanged(c, r, true);
     } else {
       beep(120, 0.05, 'sawtooth', 0.03);
     }
     updateHud();
   }
 
-  function onStonesChanged(c, r, placed) {
-    recalcFields();
-    for (const t of turtles) {
-      if (t.state !== 'walk') continue;
-      const cell = cellOf(t.x, t.y);
-      // stone dropped right in front of the turtle -> krummelig!
-      if (t.lastNext && t.lastNext.c === c && t.lastNext.r === r && placed) {
-        t.grumpyT = 0.9; t.lastNext = null; continue;
+  // ---------- physics ----------
+  // Stein-Kollision: Abprall wie am Billardtisch
+  function bounceOffStones(t) {
+    const cell = cellOf(t.x, t.y);
+    for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) {
+      const c = cell.c + dc, r = cell.r + dr;
+      if (!isStone(c, r)) continue;
+      const left = c * CELL, top = r * CELL;
+      const cx = Math.max(left, Math.min(t.x, left + CELL));
+      const cy = Math.max(top, Math.min(t.y, top + CELL));
+      const ddx = t.x - cx, ddy = t.y - cy;
+      if (ddx * ddx + ddy * ddy >= TR * TR) continue;
+      if (Math.abs(ddx) > Math.abs(ddy)) {
+        t.dir = Math.PI - t.dir;
+        t.x = cx + (ddx >= 0 ? 1 : -1) * (TR + 0.5) * (ddy === 0 ? 1 : Math.abs(ddx) / Math.hypot(ddx, ddy));
+      } else {
+        t.dir = -t.dir;
+        t.y = cy + (ddy >= 0 ? 1 : -1) * (TR + 0.5) * (ddx === 0 ? 1 : Math.abs(ddy) / Math.hypot(ddx, ddy));
       }
-      // flowers suddenly unreachable -> very krummelig, then off to the clover
-      const fi = flowerField[idx(cell.c, cell.r)];
-      if (t.mode === 'flower' && fi < 0) {
-        t.grumpyT = 1.2; t.lastNext = null;
-      }
+      t.dir += (Math.random() - 0.5) * 0.22;   // kleiner Winkel-Jitter gegen Endlosschleifen
+      t.speed = Math.max(t.baseSpeed * 0.6, t.speed * 0.96); // benommene Schildkröten werden langsamer
+      t.locked = false; t.target = null;
+      t.bounces++;
+      spawnPuff(t.x, t.y);
+      beep(220 + Math.random() * 60, 0.07, 'square', 0.05);
+      return true;
+    }
+    return false;
+  }
+
+  function flowerContact(t) {
+    for (const f of flowers) {
+      if (!f.alive) continue;
+      const p = cellCenter(f.c, f.r);
+      if (Math.hypot(p.x - t.x, p.y - t.y) < CELL * 0.55) return f;
+    }
+    return null;
+  }
+
+  function fenceCheck(t) {
+    let bumped = false;
+    if (t.x < MARGIN) { t.x = MARGIN; t.dir = Math.PI - t.dir; bumped = true; }
+    else if (t.x > W - MARGIN) { t.x = W - MARGIN; t.dir = Math.PI - t.dir; bumped = true; }
+    if (t.y < MARGIN) { t.y = MARGIN; t.dir = -t.dir; bumped = true; }
+    else if (t.y > H - MARGIN) { t.y = H - MARGIN; t.dir = -t.dir; bumped = true; }
+    if (bumped) {
+      relock(t);
+      spawnPuff(t.x, t.y);
+      beep(150, 0.06, 'triangle', 0.04);
     }
   }
 
   // ---------- turtle logic ----------
-  function neighbors(c, r) {
-    const out = [];
-    for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const nc = c + dc, nr = r + dr;
-      if (walkable(nc, nr)) out.push({ c: nc, r: nr });
-    }
-    return out;
-  }
-
   function updateTurtle(t, dt) {
     if (t.state === 'grumpy') {
       t.grumpyT -= dt;
-      if (t.grumpyT <= 0) { t.state = 'walk'; t.lastNext = null; }
+      if (t.grumpyT <= 0) t.state = 'crawl';
       return;
     }
     if (t.state === 'eat') {
@@ -278,13 +285,16 @@
           spawnCrumbs(f.c, f.r, f.color);
           if (f.hp <= 0) {
             f.alive = false;
-            recalcFields();
-            t.state = 'walk'; t.target = null;
+            t.state = 'crawl'; t.target = null;
+            relock(t);
             if (!flowers.some(fl => fl.alive)) { gameOver(); return; }
           } else {
             t.biteT = 0.9;
           }
-        } else { t.state = 'walk'; t.target = null; }
+        } else {
+          t.state = 'crawl'; t.target = null;
+          relock(t);
+        }
       }
       return;
     }
@@ -293,8 +303,9 @@
       if (Math.random() < dt * 6) spawnHeart(t.x, t.y - 18);
       if (t.munchT <= 0) {
         saved++; savesSinceStone++;
-        if (savesSinceStone >= 3) { savesSinceStone = 0; stones = Math.min(24, stones + 1); }
+        if (savesSinceStone >= 3) { savesSinceStone = 0; stones = Math.min(15, stones + 1); }
         turtles = turtles.filter(x => x !== t);
+        if (t.bounces >= 2) showBanner('Kettenschuss! 🎱');
         beep(660, 0.12, 'triangle', 0.06);
         setTimeout(() => beep(880, 0.14, 'triangle', 0.06), 90);
         updateHud();
@@ -302,69 +313,27 @@
       return;
     }
 
-    // walking
+    // crawl: geradeaus, bis Abpraller, Blume, Klee oder Zaun
+    t.x += Math.cos(t.dir) * t.speed * dt;
+    t.y += Math.sin(t.dir) * t.speed * dt;
+
+    if (bounceOffStones(t)) {
+      t.state = 'grumpy'; t.grumpyT = 0.6;
+      return;
+    }
+    const f = flowerContact(t);
+    if (f) { t.state = 'eat'; t.target = f; t.biteT = 0.5; return; }
     const cell = cellOf(t.x, t.y);
-    const fi = flowerField[idx(cell.c, cell.r)];
-    const ci = cloverField[idx(cell.c, cell.r)];
-    t.mode = fi >= 0 ? 'flower' : (ci >= 0 ? 'clover' : 'wander');
-    const field = t.mode === 'flower' ? flowerField : cloverField;
-    const dHere = t.mode === 'wander' ? -1 : field[idx(cell.c, cell.r)];
-
-    // arrived?
-    if (t.mode === 'flower' && dHere === 0) {
-      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const f = flowerAt(cell.c + dc, cell.r + dr);
-        if (f) { t.state = 'eat'; t.target = f; t.biteT = 0.5; return; }
-      }
-    }
-    if (t.mode === 'clover' && dHere === 0) {
-      t.state = 'munch'; t.munchT = 1.6; return;
-    }
-
-    // choose next cell
-    let next = null;
-    if (t.mode !== 'wander') {
-      let best = Infinity; const cands = [];
-      for (const n of neighbors(cell.c, cell.r)) {
-        const d = field[idx(n.c, n.r)];
-        if (d >= 0 && d < best) { best = d; cands.length = 0; cands.push(n); }
-        else if (d >= 0 && d === best) cands.push(n);
-      }
-      if (cands.length) next = cands[Math.floor(Math.random() * cands.length)];
-    }
-    if (!next) {
-      // wander: random neighbor, avoid immediate backtrack if possible
-      const ns = neighbors(cell.c, cell.r);
-      if (ns.length) {
-        const fwd = ns.filter(n => n.c + ',' + n.r !== t.prevCellKey);
-        const pool = fwd.length ? fwd : ns;
-        next = pool[Math.floor(Math.random() * pool.length)];
-      }
-    }
-    if (!next) return;
-
-    t.prevCellKey = cell.c + ',' + cell.r;
-    t.lastNext = next;
-    const p = cellCenter(next.c, next.r);
-    const dx = p.x - t.x, dy = p.y - t.y;
-    const dist = Math.hypot(dx, dy);
-    const step = t.speed * dt;
-    if (dist <= step || dist < 1) {
-      t.x = p.x; t.y = p.y;
-    } else {
-      t.x += dx / dist * step;
-      t.y += dy / dist * step;
-      const targetDir = Math.atan2(dy, dx);
-      let diff = targetDir - t.dir;
-      while (diff > Math.PI) diff -= 2 * Math.PI;
-      while (diff < -Math.PI) diff += 2 * Math.PI;
-      t.dir += diff * Math.min(1, dt * 10);
-    }
+    if (isClover(cell.c, cell.r)) { t.state = 'munch'; t.munchT = 1.8; return; }
+    fenceCheck(t);
   }
 
   // ---------- particles ----------
   function spawnHeart(x, y) {
     particles.push({ x, y, vy: -22, life: 0.9, type: 'heart' });
+  }
+  function spawnPuff(x, y) {
+    particles.push({ x, y, r: 4, life: 1, type: 'puff' });
   }
   function spawnCrumbs(c, r, color) {
     const p = cellCenter(c, r);
@@ -379,6 +348,7 @@
   function updateParticles(dt) {
     for (const p of particles) {
       p.life -= dt;
+      if (p.type === 'puff') { p.r += 40 * dt; p.life -= dt; }
       p.y += (p.vy || 0) * dt;
       if (p.vx) p.x += p.vx * dt;
       if (p.type === 'crumb') p.vy += 160 * dt;
@@ -397,7 +367,7 @@
   function showBanner(text) {
     const b = document.getElementById('banner');
     b.textContent = text; b.style.opacity = 1;
-    setTimeout(() => { b.style.opacity = 0; }, 1800);
+    setTimeout(() => { b.style.opacity = 0; }, 1400);
   }
   function updateHud() {
     document.getElementById('waveChip').textContent = 'Welle ' + wave;
@@ -407,28 +377,45 @@
     document.getElementById('saveChip').textContent = '💚 ' + saved;
   }
 
+  function completeWave() {
+    state = 'intermission'; interT = 2.2;
+    stones = Math.min(15, stones + 1);
+    // Zwischen den Wellen wächst eine neue Blume (max. 10)
+    if (flowers.length < 10) {
+      for (let i = 0; i < 100; i++) {
+        const c = Math.floor(Math.random() * COLS), r = Math.floor(Math.random() * ROWS);
+        if (isClover(c, r) || !walkable(c, r) || turtleOnCell(c, r)) continue;
+        flowers.push({
+          c, r, hp: 3, alive: true,
+          color: FLOWER_COLORS[flowers.length % FLOWER_COLORS.length], hurtT: 0
+        });
+        break;
+      }
+    }
+    showBanner('Welle ' + wave + ' geschafft! +1 Stein 🪨');
+    beep(523, 0.1, 'triangle'); setTimeout(() => beep(659, 0.12, 'triangle'), 110);
+    updateHud();
+  }
+
   // ---------- main loop ----------
   let lastTs = null;
   function loop(ts) {
     if (lastTs === null) lastTs = ts;
-    let dt = Math.min(0.05, (ts - lastTs) / 1000);
+    const dt = Math.min(0.05, (ts - lastTs) / 1000);
     lastTs = ts;
 
+    if (placeCd > 0) placeCd -= dt;
     if (state === 'playing') {
       if (spawnQueue > 0) {
         spawnT -= dt;
-        if (spawnT <= 0) { spawnTurtle(); spawnQueue--; spawnT = Math.max(0.9, 2.4 - wave * 0.15); }
+        if (spawnT <= 0) { spawnTurtle(); spawnQueue--; spawnT = Math.max(0.9, 2.6 - wave * 0.15); }
       } else if (turtles.length === 0) {
-        state = 'intermission'; interT = 2.2;
-        stones = Math.min(24, stones + 2);
-        showBanner('Welle ' + wave + ' geschafft! +2 Steine 🪨');
-        beep(523, 0.1, 'triangle'); setTimeout(() => beep(659, 0.12, 'triangle'), 110);
-        updateHud();
+        completeWave();
       }
       for (const t of [...turtles]) updateTurtle(t, dt);
     } else if (state === 'intermission') {
       interT -= dt;
-      if (interT <= 0) { wave++; startWave(); showBanner('Welle ' + wave + '! 🐢'); }
+      if (interT <= 0) { wave++; spawnQueue = 2 + wave; spawnT = 0.5; state = 'playing'; showBanner('Welle ' + wave + '! 🐢'); }
     }
     for (const f of flowers) if (f.hurtT > 0) f.hurtT -= dt * 2;
     updateParticles(dt);
@@ -461,6 +448,16 @@
       drawCloverLeaf(p.x + 6, p.y - 4, 7);
       drawCloverLeaf(p.x - 8, p.y + 8, 5);
     }
+    // Ziellinien der Schildkröten
+    ctx.setLineDash([5, 7]);
+    ctx.lineWidth = 1.5;
+    for (const t of turtles) {
+      if (t.state !== 'crawl' || !t.locked || !t.target || !t.target.alive) continue;
+      const p = cellCenter(t.target.c, t.target.r);
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
     // stones
     for (const key of stoneSet) {
       const [c, r] = key.split(',').map(Number);
@@ -477,6 +474,11 @@
         ctx.fillStyle = '#ff6b81';
         ctx.font = '14px sans-serif';
         ctx.fillText('♥', p.x - 5, p.y);
+        ctx.globalAlpha = 1;
+      } else if (p.type === 'puff') {
+        ctx.globalAlpha = Math.max(0, p.life) * 0.5;
+        ctx.fillStyle = '#e0e0e0';
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
         ctx.globalAlpha = 1;
       } else {
         ctx.globalAlpha = Math.min(1, p.life * 2);
@@ -605,7 +607,8 @@
   canvas.addEventListener('pointermove', e => { hoverCell = eventCell(e); });
   canvas.addEventListener('pointerleave', () => { hoverCell = null; });
   canvas.addEventListener('pointerdown', e => {
-    if (state !== 'playing') return;
+    if (state !== 'playing' || placeCd > 0) return;
+    placeCd = 0.18;
     const { c, r } = eventCell(e);
     placeOrRemove(c, r);
   });
