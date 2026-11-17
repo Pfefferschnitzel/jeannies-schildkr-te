@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Jeannies Schildkröten</title>
+<style>
+  :root { font-family: "Segoe UI", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; background: #1d2b1f; color: #f1f8e9; padding: 12px;
+  }
+  h1 { font-size: 22px; margin: 8px 0 4px; letter-spacing: 0.5px; }
+  #hud {
+    display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
+    align-items: center; margin: 4px 0 8px; font-size: 15px;
+  }
+  .chip {
+    background: #2e4a2f; border: 1px solid #4c7a4e; border-radius: 999px;
+    padding: 4px 12px; white-space: nowrap;
+  }
+  button {
+    background: #66bb6a; color: #10321a; border: none; border-radius: 8px;
+    padding: 6px 14px; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  button:hover { background: #81c784; }
+  #stage { position: relative; }
+  canvas {
+    display: block; border-radius: 10px; touch-action: manipulation;
+    max-width: 100%; height: auto;
+  }
+  .overlay {
+    position: absolute; inset: 0; border-radius: 10px;
+    background: rgba(15, 30, 16, 0.82); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px; gap: 10px;
+  }
+  .overlay h2 { margin: 0; font-size: 28px; }
+  .overlay ul { text-align: left; max-width: 460px; line-height: 1.5; font-size: 15px; }
+  .overlay .big { font-size: 17px; margin: 4px 0; }
+  .hidden { display: none; }
+  #banner {
+    position: absolute; left: 0; right: 0; top: 40%; text-align: center;
+    font-size: 26px; font-weight: 800; color: #fffde7;
+    text-shadow: 0 2px 8px rgba(0,0,0,.7); pointer-events: none;
+    opacity: 0; transition: opacity .3s;
+  }
+</style>
+</head>
+<body>
+<h1>🐢 Jeannies Schildkröten 🌼</h1>
+<div id="hud">
+  <span class="chip" id="waveChip">Welle 1</span>
+  <span class="chip" id="flowerChip">🌼 8</span>
+  <span class="chip" id="stoneChip">🪨 8</span>
+  <span class="chip" id="saveChip">💚 0</span>
+  <button id="restartBtn">Neustart</button>
+  <button id="muteBtn">🔊</button>
+</div>
+<div id="stage">
+  <canvas id="game" width="880" height="616"></canvas>
+  <div id="banner"></div>
+  <div class="overlay" id="startOverlay">
+    <h2>🐢 Jeannies Schildkröten</h2>
+    <div class="big">Die bösen Schildkröten wollen Jeannies Blumen fressen!</div>
+    <ul>
+      <li>🪨 <b>Klicke auf eine Wiese</b>, um einen Stein zu bauen. Klicke einen Stein wieder an, um ihn zurückzubauen.</li>
+      <li>🧱 Blockiere die Wege zu den Blumen, damit die Schildkröten umgeleitet werden.</li>
+      <li>🍀 Leite sie zur <b>Kleeblattwiese am rechten Rand</b> – dort werden sie satt und gehen glücklich fort.</li>
+      <li>❌ <b>Töten verboten!</b> Die Schildkröten werden nur kurz krummelig, wenn man ihnen den Weg versperrt.</li>
+      <li>🌼 Frisst eine Schildkröte alle Blumen auf, ist das Spiel vorbei.</li>
+    </ul>
+    <button id="startBtn">Spiel starten</button>
+  </div>
+  <div class="overlay hidden" id="overOverlay">
+    <h2>Alle Blumen sind gefressen! 🥀</h2>
+    <div class="big" id="overStats"></div>
+    <button id="againBtn">Nochmal spielen</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const COLS = 20, ROWS = 14, CELL = 44;
+  const W = COLS * CELL, H = ROWS * CELL;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // ---------- state ----------
+  let state = 'start'; // start | playing | intermission | gameover
+  let wave, stones, saved, savesSinceStone, flowers, turtles, particles;
+  let stoneSet;                 // Set of "c,r"
+  let flowerField, cloverField; // Int16Array distance fields
+  let spawnQueue, spawnT, interT, overT;
+  let hoverCell = null;
+  let muted = false;
+  let idCounter = 0;
+
+  const CLOVER_C0 = 18, CLOVER_C1 = 19, CLOVER_R0 = 4, CLOVER_R1 = 9;
+  const FLOWER_COLORS = ['#f06292','#ba68c8','#ffb74d','#4fc3f7','#fff176','#f8bbd0','#ff8a65','#aed581'];
+  const START_FLOWERS = [[3,3],[6,6],[4,10],[9,3],[10,11],[7,8],[13,6],[12,2]];
+
+  const idx = (c, r) => r * COLS + c;
+  const inGrid = (c, r) => c >= 0 && c < COLS && r >= 0 && r < ROWS;
+  const isClover = (c, r) => c >= CLOVER_C0 && c <= CLOVER_C1 && r >= CLOVER_R0 && r <= CLOVER_R1;
+  const isStone = (c, r) => stoneSet.has(c + ',' + r);
+  const flowerAt = (c, r) => flowers.find(f => f.alive && f.c === c && f.r === r);
+  const walkable = (c, r) => inGrid(c, r) && !isStone(c, r) && !flowerAt(c, r);
+
+  function cellCenter(c, r) { return { x: c * CELL + CELL / 2, y: r * CELL + CELL / 2 }; }
+  function cellOf(x, y) {
+    return { c: Math.max(0, Math.min(COLS - 1, Math.floor(x / CELL))),
+             r: Math.max(0, Math.min(ROWS - 1, Math.floor(y / CELL))) };
+  }
+
+  // ---------- audio ----------
+  let actx = null;
+  function beep(freq, dur = 0.08, type = 'square', vol = 0.05) {
+    if (muted) return;
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+      o.connect(g); g.connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + dur);
+    } catch (e) {}
+  }
+
+  // ---------- distance fields (multi-source BFS) ----------
+  function bfs(targets) {
+    const dist = new Int16Array(COLS * ROWS).fill(-1);
+    const q = [];
+    for (const [c, r] of targets) {
+      if (walkable(c, r) && dist[idx(c, r)] === -1) {
+        dist[idx(c, r)] = 0; q.push([c, r]);
+      }
+    }
+    let head = 0;
+    while (head < q.length) {
+      const [c, r] = q[head++];
+      const d = dist[idx(c, r)];
+      for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nc = c + dc, nr = r + dr;
+        if (walkable(nc, nr) && dist[idx(nc, nr)] === -1) {
+          dist[idx(nc, nr)] = d + 1; q.push([nc, nr]);
+        }
+      }
+    }
+    return dist;
+  }
+
+  function recalcFields() {
+    const ft = [];
+    for (const f of flowers) {
+      if (!f.alive) continue;
+      for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nc = f.c + dc, nr = f.r + dr;
+        if (walkable(nc, nr)) ft.push([nc, nr]);
+      }
+    }
+    flowerField = bfs(ft);
+    const ct = [];
+    for (let c = CLOVER_C0; c <= CLOVER_C1; c++)
+      for (let r = CLOVER_R0; r <= CLOVER_R1; r++) ct.push([c, r]);
+    cloverField = bfs(ct);
+  }
+
+  // ---------- game setup ----------
+  function resetGame() {
+    wave = 1; stones = 8; saved = 0; savesSinceStone = 0;
+    stoneSet = new Set();
+    flowers = START_FLOWERS.map(([c, r], i) => ({
+      c, r, hp: 3, alive: true, color: FLOWER_COLORS[i % FLOWER_COLORS.length], hurtT: 0
+    }));
+    turtles = []; particles = [];
+    spawnQueue = 0; spawnT = 0; interT = 0; overT = 0;
+    recalcFields();
+    startWave();
+  }
+
+  function startWave() {
+    spawnQueue = 2 + wave;
+    spawnT = 0.5;
+    state = 'playing';
+    updateHud();
+  }
+
+  function spawnTurtle() {
+    // random edge cell, not clover, walkable
+    let cell = null;
+    for (let i = 0; i < 80; i++) {
+      const side = Math.floor(Math.random() * 4);
+      let c, r;
+      if (side === 0) { c = 0; r = Math.floor(Math.random() * ROWS); }
+      else if (side === 1) { c = COLS - 1; r = Math.floor(Math.random() * ROWS); }
+      else if (side === 2) { c = Math.floor(Math.random() * COLS); r = 0; }
+      else { c = Math.floor(Math.random() * COLS); r = ROWS - 1; }
+      if (!isClover(c, r) && walkable(c, r)) { cell = { c, r }; break; }
+    }
+    if (!cell) return;
+    const p = cellCenter(cell.c, cell.r);
+    turtles.push({
+      id: idCounter++, x: p.x, y: p.y, dir: 0,
+      speed: Math.min(92, 52 + wave * 4),
+      mode: 'flower', state: 'walk', grumpyT: 0, biteT: 0, munchT: 0,
+      target: null, lastNext: null, wanderT: 0, prevCellKey: ''
+    });
+  }
+
+  // ---------- stones ----------
+  function turtleOnCell(c, r) {
+    const p = cellCenter(c, r);
+    return turtles.some(t => Math.hypot(t.x - p.x, t.y - p.y) < CELL * 0.75);
+  }
+  function canPlace(c, r) {
+    return inGrid(c, r) && !isClover(c, r) && !isStone(c, r) &&
+           !flowerAt(c, r) && !turtleOnCell(c, r) && stones > 0;
+  }
+  function placeOrRemove(c, r) {
+    const key = c + ',' + r;
+    if (isStone(c, r)) {
+      stoneSet.delete(key); stones++;
+      beep(300, 0.06, 'triangle');
+      onStonesChanged(c, r, false);
+    } else if (canPlace(c, r)) {
+      stoneSet.add(key); stones--;
+      beep(180, 0.07, 'square');
+      onStonesChanged(c, r, true);
+    } else {
+      beep(120, 0.05, 'sawtooth', 0.03);
+    }
+    updateHud();
+  }
+
+  function onStonesChanged(c, r, placed) {
+    recalcFields();
+    for (const t of turtles) {
+      if (t.state !== 'walk') continue;
+      const cell = cellOf(t.x, t.y);
+      // stone dropped right in front of the turtle -> krummelig!
+      if (t.lastNext && t.lastNext.c === c && t.lastNext.r === r && placed) {
+        t.grumpyT = 0.9; t.lastNext = null; continue;
+      }
+      // flowers suddenly unreachable -> very krummelig, then off to the clover
+      const fi = flowerField[idx(cell.c, cell.r)];
+      if (t.mode === 'flower' && fi < 0) {
+        t.grumpyT = 1.2; t.lastNext = null;
+      }
+    }
+  }
+
+  // ---------- turtle logic ----------
+  function neighbors(c, r) {
+    const out = [];
+    for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nc = c + dc, nr = r + dr;
+      if (walkable(nc, nr)) out.push({ c: nc, r: nr });
+    }
+    return out;
+  }
+
+  function updateTurtle(t, dt) {
+    if (t.state === 'grumpy') {
+      t.grumpyT -= dt;
+      if (t.grumpyT <= 0) { t.state = 'walk'; t.lastNext = null; }
+      return;
+    }
+    if (t.state === 'eat') {
+      t.biteT -= dt;
+      if (t.biteT <= 0) {
+        const f = t.target;
+        if (f && f.alive) {
+          f.hp--; f.hurtT = 1;
+          beep(140 + Math.random() * 40, 0.1, 'sawtooth', 0.04);
+          spawnCrumbs(f.c, f.r, f.color);
+          if (f.hp <= 0) {
+            f.alive = false;
+            recalcFields();
+            t.state = 'walk'; t.target = null;
+            if (!flowers.some(fl => fl.alive)) { gameOver(); return; }
+          } else {
+            t.biteT = 0.9;
+          }
+        } else { t.state = 'walk'; t.target = null; }
+      }
+      return;
+    }
+    if (t.state === 'munch') {
+      t.munchT -= dt;
+      if (Math.random() < dt * 6) spawnHeart(t.x, t.y - 18);
+      if (t.munchT <= 0) {
+        saved++; savesSinceStone++;
+        if (savesSinceStone >= 3) { savesSinceStone = 0; stones = Math.min(24, stones + 1); }
+        turtles = turtles.filter(x => x !== t);
+        beep(660, 0.12, 'triangle', 0.06);
+        setTimeout(() => beep(880, 0.14, 'triangle', 0.06), 90);
+        updateHud();
+      }
+      return;
+    }
+
+    // walking
+    const cell = cellOf(t.x, t.y);
+    const fi = flowerField[idx(cell.c, cell.r)];
+    const ci = cloverField[idx(cell.c, cell.r)];
+    t.mode = fi >= 0 ? 'flower' : (ci >= 0 ? 'clover' : 'wander');
+    const field = t.mode === 'flower' ? flowerField : cloverField;
+    const dHere = t.mode === 'wander' ? -1 : field[idx(cell.c, cell.r)];
+
+    // arrived?
+    if (t.mode === 'flower' && dHere === 0) {
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const f = flowerAt(cell.c + dc, cell.r + dr);
+        if (f) { t.state = 'eat'; t.target = f; t.biteT = 0.5; return; }
+      }
+    }
+    if (t.mode === 'clover' && dHere === 0) {
+      t.state = 'munch'; t.munchT = 1.6; return;
+    }
+
+    // choose next cell
+    let next = null;
+    if (t.mode !== 'wander') {
+      let best = Infinity; const cands = [];
+      for (const n of neighbors(cell.c, cell.r)) {
+        const d = field[idx(n.c, n.r)];
+        if (d >= 0 && d < best) { best = d; cands.length = 0; cands.push(n); }
+        else if (d >= 0 && d === best) cands.push(n);
+      }
+      if (cands.length) next = cands[Math.floor(Math.random() * cands.length)];
+    }
+    if (!next) {
+      // wander: random neighbor, avoid immediate backtrack if possible
+      const ns = neighbors(cell.c, cell.r);
+      if (ns.length) {
+        const fwd = ns.filter(n => n.c + ',' + n.r !== t.prevCellKey);
+        const pool = fwd.length ? fwd : ns;
+        next = pool[Math.floor(Math.random() * pool.length)];
+      }
+    }
+    if (!next) return;
+
+    t.prevCellKey = cell.c + ',' + cell.r;
+    t.lastNext = next;
+    const p = cellCenter(next.c, next.r);
+    const dx = p.x - t.x, dy = p.y - t.y;
+    const dist = Math.hypot(dx, dy);
+    const step = t.speed * dt;
+    if (dist <= step || dist < 1) {
+      t.x = p.x; t.y = p.y;
+    } else {
+      t.x += dx / dist * step;
+      t.y += dy / dist * step;
+      const targetDir = Math.atan2(dy, dx);
+      let diff = targetDir - t.dir;
+      while (diff > Math.PI) diff -= 2 * Math.PI;
+      while (diff < -Math.PI) diff += 2 * Math.PI;
+      t.dir += diff * Math.min(1, dt * 10);
+    }
+  }
+
+  // ---------- particles ----------
+  function spawnHeart(x, y) {
+    particles.push({ x, y, vy: -22, life: 0.9, type: 'heart' });
+  }
+  function spawnCrumbs(c, r, color) {
+    const p = cellCenter(c, r);
+    for (let i = 0; i < 6; i++) {
+      particles.push({
+        x: p.x + (Math.random() - 0.5) * 20, y: p.y + (Math.random() - 0.5) * 20,
+        vx: (Math.random() - 0.5) * 50, vy: -30 - Math.random() * 30,
+        life: 0.7, type: 'crumb', color
+      });
+    }
+  }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      p.y += (p.vy || 0) * dt;
+      if (p.vx) p.x += p.vx * dt;
+      if (p.type === 'crumb') p.vy += 160 * dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+  }
+
+  // ---------- flow ----------
+  function gameOver() {
+    state = 'gameover';
+    document.getElementById('overStats').textContent =
+      wave + ' Wellen überstanden · ' + saved + ' Schildkröten glücklich gemacht 💚';
+    document.getElementById('overOverlay').classList.remove('hidden');
+    beep(220, 0.3, 'sawtooth', 0.06);
+  }
+  function showBanner(text) {
+    const b = document.getElementById('banner');
+    b.textContent = text; b.style.opacity = 1;
+    setTimeout(() => { b.style.opacity = 0; }, 1800);
+  }
+  function updateHud() {
+    document.getElementById('waveChip').textContent = 'Welle ' + wave;
+    document.getElementById('flowerChip').textContent =
+      '🌼 ' + flowers.filter(f => f.alive).length;
+    document.getElementById('stoneChip').textContent = '🪨 ' + stones;
+    document.getElementById('saveChip').textContent = '💚 ' + saved;
+  }
+
+  // ---------- main loop ----------
+  let lastTs = null;
+  function loop(ts) {
+    if (lastTs === null) lastTs = ts;
+    let dt = Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+
+    if (state === 'playing') {
+      if (spawnQueue > 0) {
+        spawnT -= dt;
+        if (spawnT <= 0) { spawnTurtle(); spawnQueue--; spawnT = Math.max(0.9, 2.4 - wave * 0.15); }
+      } else if (turtles.length === 0) {
+        state = 'intermission'; interT = 2.2;
+        stones = Math.min(24, stones + 2);
+        showBanner('Welle ' + wave + ' geschafft! +2 Steine 🪨');
+        beep(523, 0.1, 'triangle'); setTimeout(() => beep(659, 0.12, 'triangle'), 110);
+        updateHud();
+      }
+      for (const t of [...turtles]) updateTurtle(t, dt);
+    } else if (state === 'intermission') {
+      interT -= dt;
+      if (interT <= 0) { wave++; startWave(); showBanner('Welle ' + wave + '! 🐢'); }
+    }
+    for (const f of flowers) if (f.hurtT > 0) f.hurtT -= dt * 2;
+    updateParticles(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- drawing ----------
+  const decor = [];
+  for (let i = 0; i < 60; i++) {
+    decor.push({ c: Math.random() * COLS, r: Math.random() * ROWS, k: Math.random() });
+  }
+
+  function draw() {
+    // grass
+    for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+      ctx.fillStyle = (c + r) % 2 ? '#7cb95a' : '#85c263';
+      ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+    }
+    ctx.fillStyle = 'rgba(60,120,45,0.35)';
+    for (const d of decor) {
+      if (isClover(Math.floor(d.c), Math.floor(d.r))) continue;
+      ctx.fillRect(d.c * CELL + d.k * 30 + 4, d.r * CELL + d.k * 30 + 4, 3, 6);
+    }
+    // clover meadow
+    for (let c = CLOVER_C0; c <= CLOVER_C1; c++) for (let r = CLOVER_R0; r <= CLOVER_R1; r++) {
+      ctx.fillStyle = (c + r) % 2 ? '#3e8e41' : '#357c38';
+      ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+      const p = cellCenter(c, r);
+      drawCloverLeaf(p.x + 6, p.y - 4, 7);
+      drawCloverLeaf(p.x - 8, p.y + 8, 5);
+    }
+    // stones
+    for (const key of stoneSet) {
+      const [c, r] = key.split(',').map(Number);
+      drawStone(c * CELL + CELL / 2, r * CELL + CELL / 2);
+    }
+    // flowers
+    for (const f of flowers) drawFlower(f);
+    // turtles
+    for (const t of turtles) drawTurtle(t);
+    // particles
+    for (const p of particles) {
+      if (p.type === 'heart') {
+        ctx.globalAlpha = Math.min(1, p.life * 2);
+        ctx.fillStyle = '#ff6b81';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('♥', p.x - 5, p.y);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.globalAlpha = Math.min(1, p.life * 2);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+        ctx.globalAlpha = 1;
+      }
+    }
+    // ghost preview
+    if (hoverCell && state === 'playing') {
+      const { c, r } = hoverCell;
+      if (inGrid(c, r) && !isClover(c, r) && !isStone(c, r) && !flowerAt(c, r)) {
+        ctx.globalAlpha = stones > 0 && !turtleOnCell(c, r) ? 0.45 : 0.2;
+        drawStone(c * CELL + CELL / 2, r * CELL + CELL / 2);
+        ctx.globalAlpha = 1;
+      }
+    }
+    // fence
+    ctx.fillStyle = '#8d6e63';
+    for (let x = 0; x < W; x += 28) {
+      ctx.fillRect(x, 0, 6, 8); ctx.fillRect(x, H - 8, 6, 8);
+    }
+    for (let y = 0; y < H; y += 28) {
+      ctx.fillRect(0, y, 8, 6); ctx.fillRect(W - 8, y, 8, 6);
+    }
+    ctx.fillStyle = '#a1887f';
+    ctx.fillRect(0, H / 2 - 3, W, 6);
+    ctx.fillRect(0, 4, W, 4);
+  }
+
+  function drawStone(x, y) {
+    ctx.fillStyle = '#9e9e9e';
+    ctx.strokeStyle = '#616161'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(x, y + 2, 15, 11, 0.3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#bdbdbd';
+    ctx.beginPath(); ctx.ellipse(x - 4, y - 3, 7, 5, 0.3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawCloverLeaf(x, y, s) {
+    ctx.fillStyle = '#66bb6a';
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI / 2 + i * (2 * Math.PI / 3);
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(a) * s * 0.7, y + Math.sin(a) * s * 0.7, s * 0.62, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawFlower(f) {
+    const p = cellCenter(f.c, f.r);
+    const wob = f.hurtT > 0 ? Math.sin(f.hurtT * 25) * f.hurtT * 0.15 : 0;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(wob);
+    if (!f.alive) {
+      ctx.strokeStyle = '#795548'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(0, 16); ctx.quadraticCurveTo(3, 4, 0, -6); ctx.stroke();
+      ctx.restore(); return;
+    }
+    // stem
+    ctx.strokeStyle = '#33691e'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, 18); ctx.quadraticCurveTo(-4, 6, 0, -4); ctx.stroke();
+    ctx.fillStyle = '#43a047';
+    ctx.beginPath(); ctx.ellipse(-7, 8, 6, 3, -0.5, 0, Math.PI * 2); ctx.fill();
+    // petals depend on hp
+    const petalN = [0, 4, 5, 6][f.hp] || 6;
+    const pr = [0, 6, 7, 8][f.hp] || 8;
+    ctx.fillStyle = f.color;
+    for (let i = 0; i < petalN; i++) {
+      const a = i * (2 * Math.PI / petalN);
+      ctx.beginPath();
+      ctx.arc(Math.cos(a) * pr, Math.sin(a) * pr - 6, pr * 0.75, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#ffd54f';
+    ctx.beginPath(); ctx.arc(0, -6, pr * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawTurtle(t) {
+    const shake = t.state === 'grumpy' ? (Math.random() - 0.5) * 3 : 0;
+    ctx.save();
+    ctx.translate(t.x + shake, t.y + shake);
+    ctx.rotate(t.dir);
+    // feet
+    ctx.fillStyle = '#7cb342';
+    for (const [fx, fy] of [[-8, -12], [-8, 12], [9, -12], [9, 12]]) {
+      ctx.beginPath(); ctx.ellipse(fx, fy, 5, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    // head
+    ctx.beginPath(); ctx.arc(17, 0, 6.5, 0, Math.PI * 2); ctx.fill();
+    // shell
+    ctx.fillStyle = t.state === 'grumpy' ? '#c25b3a' : '#2f7d32';
+    ctx.strokeStyle = '#1b4d1e'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(0, 0, 16, 12, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#4caf50';
+    for (const [hx, hy] of [[-6, 0], [5, -5], [5, 5]]) {
+      ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 2); ctx.fill();
+    }
+    // eyes on head
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(19, -2.5, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(19, 2.5, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = t.state === 'grumpy' ? '#d32f2f' : '#222';
+    ctx.beginPath(); ctx.arc(20, -2.5, 1.1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(20, 2.5, 1.1, 0, Math.PI * 2); ctx.fill();
+    if (t.state === 'grumpy') {
+      ctx.strokeStyle = '#b71c1c'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(16, -5.5); ctx.lineTo(21, -4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(16, 5.5); ctx.lineTo(21, 4); ctx.stroke();
+    }
+    ctx.restore();
+    if (t.state === 'grumpy') {
+      ctx.font = '13px sans-serif';
+      ctx.fillText('😤', t.x - 8, t.y - 20);
+    }
+  }
+
+  // ---------- input ----------
+  function eventCell(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    return cellOf(x, y);
+  }
+  canvas.addEventListener('pointermove', e => { hoverCell = eventCell(e); });
+  canvas.addEventListener('pointerleave', () => { hoverCell = null; });
+  canvas.addEventListener('pointerdown', e => {
+    if (state !== 'playing') return;
+    const { c, r } = eventCell(e);
+    placeOrRemove(c, r);
+  });
+
+  document.getElementById('startBtn').addEventListener('click', () => {
+    document.getElementById('startOverlay').classList.add('hidden');
+    resetGame();
+  });
+  document.getElementById('againBtn').addEventListener('click', () => {
+    document.getElementById('overOverlay').classList.add('hidden');
+    resetGame();
+  });
+  document.getElementById('restartBtn').addEventListener('click', () => {
+    document.getElementById('startOverlay').classList.add('hidden');
+    document.getElementById('overOverlay').classList.add('hidden');
+    resetGame();
+  });
+  document.getElementById('muteBtn').addEventListener('click', e => {
+    muted = !muted;
+    e.target.textContent = muted ? '🔇' : '🔊';
+  });
+
+  // idle preview behind the start overlay
+  resetGame();
+  state = 'start';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
